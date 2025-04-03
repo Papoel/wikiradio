@@ -1,0 +1,49 @@
+{
+    # Définition globale du serveur
+    auto_https off
+    admin off
+    http_port 80
+    https_port 443
+}
+
+localhost:80 {
+    # Désactiver la redirection HTTPS
+    tls internal
+    
+    # Racine du projet Symfony
+    root * /app/public
+
+    # Activation de PHP
+    php_server
+
+    # Logs
+    log {
+        output stdout
+        format console
+        level INFO
+    }
+
+    # Gestion des erreurs
+    handle_errors {
+        root * /app/public
+        rewrite * /index.php?{query}
+    }
+
+    # Règles de routage pour Symfony
+    @symfony_front {
+        path_regexp symfony ^/index\.php(/|$)
+    }
+
+    route {
+        # Essaie de servir les fichiers statiques directement
+        try_files {path} {path}/index.html /index.php?{query}
+        
+        # Traitement des requêtes PHP
+        handle @symfony_front {
+            php_fastcgi
+        }
+    }
+
+    # Compression
+    encode gzip
+}

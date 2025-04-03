@@ -1,0 +1,91 @@
+services:
+  # FrankenPHP - Serveur web moderne pour PHP
+  frankenphp:
+    image: dunglas/frankenphp:latest
+    container_name: wikiradio_frankenphp
+    ports:
+      - "8080:80" # HTTP
+    volumes:
+      - ./:/app
+      - ./var/cache:/app/var/cache
+      - ./var/log:/app/var/log
+      - ./var/sessions:/app/var/sessions
+      - ./docker/frankenphp/conf.d/custom.ini:/usr/local/etc/php/conf.d/custom.ini
+    environment:
+      - SERVER_NAME=:80
+      - APP_ENV=dev
+      - APP_DEBUG=1
+      - APP_SECRET=${APP_SECRET:-ChangeMe}
+      - DATABASE_URL=mysql://root:root@database:3306/wikiradio?serverVersion=8.0
+      - MAILER_DSN=smtp://mailhog:1025
+      - REDIS_URL=redis://redis:6379
+      - CADDY_GLOBAL_OPTIONS=auto_https off
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - wikiradio_network
+    restart: unless-stopped
+
+  # Base de données MySQL
+  database:
+    image: mysql:8.0
+    container_name: wikiradio_mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: wikiradio
+      MYSQL_USER: app
+      MYSQL_PASSWORD: app
+    volumes:
+      - wikiradio_mysql_data:/var/lib/mysql
+    ports:
+      - "3306:3306"
+    networks:
+      - wikiradio_network
+    restart: unless-stopped
+
+  # PhpMyAdmin pour gérer la base de données
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: wikiradio_phpmyadmin
+    environment:
+      PMA_HOST: database
+      PMA_PORT: 3306
+      UPLOAD_LIMIT: 50M
+    ports:
+      - "8081:80"
+    depends_on:
+      - database
+    networks:
+      - wikiradio_network
+    restart: unless-stopped
+
+  # Mailhog pour tester les emails
+  mailhog:
+    image: mailhog/mailhog
+    container_name: wikiradio_mailhog
+    ports:
+      - "1025:1025" # SMTP port
+      - "8025:8025" # Web UI
+    networks:
+      - wikiradio_network
+    restart: unless-stopped
+
+  # Redis pour le cache
+  redis:
+    image: redis:alpine
+    container_name: wikiradio_redis
+    ports:
+      - "6379:6379"
+    networks:
+      - wikiradio_network
+    restart: unless-stopped
+
+networks:
+  wikiradio_network:
+    driver: bridge
+
+volumes:
+  wikiradio_mysql_data:
