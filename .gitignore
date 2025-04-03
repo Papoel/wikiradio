@@ -17,3 +17,9 @@
 /phpunit.xml
 /.phpunit.cache/
 ###< phpunit/phpunit ###
+
+###> data-protection ###
+/datas/*
+!/datas/
+!/datas/.gitkeep
+###< data-protection ###
