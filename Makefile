@@ -1,5 +1,5 @@
 # WikiRadio - Makefile
-.PHONY: help install start stop restart build clear-cache test lint fix-cs db-create db-drop db-migration db-migrate db-fixtures db-entity db-reset security docker-up docker-down phpcs phpstan phpmd phpcpd psalm php-metrics before-commit pest
+.PHONY: help install start stop restart build clear-cache test lint fix-cs db-create db-drop db-migration db-migrate db-fixtures db-entity db-reset security docker-up docker-down phpcs phpstan phpmd phpcpd psalm php-metrics before-commit pest import-radiogrammes docker-import-radiogrammes
 
 # Colors
 GREEN = \033[0;32m
@@ -248,6 +248,14 @@ db-entity: ## Génère les entités
 
 db-reset: db-drop db-create db-migrate ## Réinitialise la base de données
 	@$(MAKE) db-fixtures
+
+import-radiogrammes: ## Importe les radiogrammes avec une limite de mémoire augmentée (en local)
+	@echo "$(GREEN)📊 Importation des radiogrammes en local avec une limite de mémoire augmentée...$(NC)"
+	$(PHP) -d memory_limit=1024M bin/console app:import-radiogrammes
+
+docker-import-radiogrammes: ## Importe les radiogrammes avec une limite de mémoire augmentée (dans Docker)
+	@echo "$(GREEN)📊 Importation des radiogrammes dans Docker avec une limite de mémoire augmentée...$(NC)"
+	$(DOCKER_COMPOSE) exec frankenphp php -d memory_limit=1024M bin/console app:import-radiogrammes
 
 table-count: ## Affiche le nombre d'enregistrements dans une table
 	@echo "$(GREEN)📊 Comptage des enregistrements dans une table...$(NC)"

@@ -27,13 +27,13 @@ class ImportDataService
         $this->entityManager = $doctrine->getManager();
     }
 
-    public function importData(string $folder, SymfonyStyle $style): void
+    public function importData(string $folder, array $filenames, SymfonyStyle $style): void
     {
         // Mise en place d'un style
         $style->title('Importation de la base de données des radiogrammes');
 
         // Liste des fichiers à importer
-        $filenames = ['radiogrammes-1.csv'];
+        // $filenames = ['radiogrammes-1.csv'];
 
         // Définir le délimiteur
         $delimiter = ',';
@@ -68,13 +68,18 @@ class ImportDataService
         // Tableau pour stocker les radiogrammes en erreur
         $this->errorRecords = [];
         $this->errorTypes = [];
-        $this->pendingBatch = [];
 
         // Tableau pour suivre les radiogrammes uniques déjà traités
         $processedUniqueValues = [];
 
         // Tableau pour suivre les radiogrammes uniques importés avec succès
         $successfullyImportedValues = [];
+
+        // Taille du lot pour le traitement par lots (batch processing)
+        $batchSize = 20; // Réduire la taille du lot pour éviter les problèmes de mémoire
+
+        // Tableau pour collecter les radiogrammes à insérer par lots
+        $radiogrammesToInsert = [];
 
         foreach ($filenames as $filename) {
             $filePath = $folder . '/' . $filename;
@@ -94,8 +99,10 @@ class ImportDataService
                 $processedCount++;
 
                 try {
-                    // Réinitialiser l'EntityManager à chaque itération pour éviter les problèmes
-                    $this->resetEntityManager();
+                    // S'assurer que l'EntityManager est ouvert
+                    if (!$this->isEntityManagerOpen()) {
+                        $this->resetEntityManager();
+                    }
 
                     // Supprimer les valeurs nulles du tableau $record
                     $record = array_filter($record, fn($value) => $value !== null);
@@ -136,9 +143,8 @@ class ImportDataService
                     // Créer ou mettre à jour le radiogramme
                     $result = $this->createOrUpdateRadiogramme($record);
 
-                    // Persister et flusher immédiatement chaque radiogramme
-                    $this->entityManager->persist($result['radiogramme']);
-                    $this->entityManager->flush();
+                    // Ajouter le radiogramme à la liste pour insertion par lots
+                    $radiogrammesToInsert[] = $result['radiogramme'];
 
                     // Mettre à jour les compteurs
                     if ($result['isNew']) {
@@ -152,16 +158,30 @@ class ImportDataService
                     // Ajouter à la liste des radiogrammes importés avec succès
                     $successfullyImportedValues[$uniqueValue] = true;
 
-                    // Détacher l'entité pour libérer la mémoire
-                    $this->entityManager->detach($result['radiogramme']);
+                    // Traiter par lots pour économiser la mémoire
+                    if (count($radiogrammesToInsert) >= $batchSize) {
+                        $this->bulkInsertRadiogrammes($radiogrammesToInsert, $style, $progressBar);
+                        $radiogrammesToInsert = [];
+                    }
                 } catch (\Exception $e) {
                     // Capturer l'erreur et l'ajouter à la liste des erreurs
                     $this->handleImportError($record, $e, $progressBar);
                     $errorCount++;
+
+                    // En cas d'erreur, réinitialiser l'EntityManager
+                    if (strpos($e->getMessage(), 'EntityManager is closed') !== false) {
+                        $this->resetEntityManager();
+                    }
                 }
 
                 // Avancer la barre de progression
                 $progressBar->advance();
+            }
+
+            // Traiter les radiogrammes restants
+            if (!empty($radiogrammesToInsert)) {
+                $this->bulkInsertRadiogrammes($radiogrammesToInsert, $style, $progressBar);
+                $radiogrammesToInsert = [];
             }
         }
 
@@ -199,34 +219,6 @@ class ImportDataService
             'Nombre de radiogrammes uniques importés avec succès: %d',
             $successfullyImportedCount
         ));
-
-        // Vérifier si les compteurs correspondent
-        if ($actualCount !== $successfullyImportedCount) {
-            $style->warning(sprintf(
-                'Attention: Le nombre de radiogrammes uniques importés avec succès (%d) ne correspond pas au nombre réel en base de données (%d).',
-                $successfullyImportedCount,
-                $actualCount
-            ));
-
-            // Afficher des informations de diagnostic
-            $style->section('Informations de diagnostic');
-            $style->text(sprintf('- Compteur d\'importation: %d', $importedCount));
-            $style->text(sprintf('- Compteur de mise à jour: %d', $updatedCount));
-            $style->text(sprintf('- Compteur d\'erreurs: %d', $errorCount));
-            $style->text(sprintf('- Nombre total d\'enregistrements traités: %d', $processedCount));
-            $style->text(sprintf('- Nombre de valeurs uniques traitées: %d', count($processedUniqueValues)));
-            $style->text(sprintf('- Nombre de valeurs uniques importées avec succès: %d', $successfullyImportedCount));
-            $style->text(sprintf('- Nombre réel d\'enregistrements en base de données: %d', $actualCount));
-        }
-
-        // Afficher un résumé des types d'erreurs
-        if (!empty($this->errorTypes)) {
-            $style->section('Résumé des erreurs');
-            foreach ($this->errorTypes as $type => $count) {
-                $style->text(sprintf('- %s: %d', $type, $count));
-            }
-            $style->note('Les erreurs ont été enregistrées dans la table radiogrammes_errors pour analyse ultérieure.');
-        }
     }
 
     /**
@@ -248,15 +240,17 @@ class ImportDataService
     /**
      * Vérifie si l'EntityManager est ouvert et utilisable
      */
-    private function isEntityManagerOpen(): bool
+    private function isEntityManagerOpen(?EntityManagerInterface $entityManager = null): bool
     {
-        if (!$this->entityManager) {
+        $em = $entityManager ?? $this->entityManager;
+
+        if (!$em) {
             return false;
         }
 
         try {
             // Une opération simple qui échouera si l'EntityManager est fermé
-            $this->entityManager->getRepository(Radiogramme::class);
+            $em->getRepository(Radiogramme::class);
             return true;
         } catch (\Throwable $e) {
             return false;
@@ -308,7 +302,7 @@ class ImportDataService
     /**
      * Gère une erreur d'importation en l'ajoutant à la liste des erreurs
      */
-    private function handleImportError(array $record, \Exception $e, ProgressBar $progressBar, string $customErrorType = null): void
+    private function handleImportError(array $record, \Exception $e, ProgressBar $progressBar, ?string $customErrorType = null): void
     {
         // Déterminer le type d'erreur
         $errorType = $customErrorType ?? 'Erreur inconnue';
@@ -389,8 +383,106 @@ class ImportDataService
             $isNew = true;
         }
 
+        // Vérifier si la date est valide avant de continuer
+        $dateString = $record['date'] ?? null;
+        $date = null;
+        $dateError = false;
+
+        if (!empty($dateString)) {
+            // Vérifier si la date est au format "mois-année" comme "déc.-21"
+            if (preg_match('/^([a-zéû]+)\.-(\d{2})$/i', $dateString, $matches)) {
+                // Conversion des mois en français vers numérique
+                $moisFr = [
+                    'jan' => '01', 'fév' => '02', 'mar' => '03', 'avr' => '04',
+                    'mai' => '05', 'juin' => '06', 'juil' => '07', 'aoû' => '08',
+                    'sep' => '09', 'oct' => '10', 'nov' => '11', 'déc' => '12'
+                ];
+
+                $mois = strtolower(substr($matches[1], 0, 3));
+                if (isset($moisFr[$mois])) {
+                    $moisNum = $moisFr[$mois];
+                    $annee = '20' . $matches[2]; // Supposer que c'est 2000+
+                    try {
+                        $date = new \DateTime("$annee-$moisNum-01");
+                    } catch (\Exception $e) {
+                        $dateError = true;
+                        error_log("Impossible de convertir la date au format mois-année: {$dateString} - Erreur: " . $e->getMessage());
+                    }
+                } else {
+                    $dateError = true;
+                    error_log("Mois non reconnu dans la date: {$dateString}");
+                }
+            }
+            // Vérifier si la date est juste une année à 2 chiffres (comme "82" pour 1982)
+            elseif (is_numeric($dateString) && strlen($dateString) == 2) {
+                // Convertir en année complète (19xx)
+                $year = 1900 + (int)$dateString;
+                try {
+                    $date = new \DateTime($year . '-01-01');
+                } catch (\Exception $e) {
+                    $dateError = true;
+                    error_log("Impossible de convertir l'année à 2 chiffres: {$dateString} - Erreur: " . $e->getMessage());
+                }
+            }
+            // Vérifier si la date est juste une année à 4 chiffres
+            elseif (is_numeric($dateString) && strlen($dateString) == 4) {
+                try {
+                    $date = new \DateTime($dateString . '-01-01');
+                } catch (\Exception $e) {
+                    $dateError = true;
+                    error_log("Impossible de convertir l'année à 4 chiffres: {$dateString} - Erreur: " . $e->getMessage());
+                }
+            } else {
+                // Formats de date à essayer dans l'ordre
+                $dateFormats = [
+                    'd/m/Y', // Format français (31/12/2023)
+                    'Y-m-d',  // Format ISO (2023-12-31)
+                    'd-m-Y',  // Format avec tirets (31-12-2023)
+                    'Y/m/d',  // Format avec slashes inversés (2023/12/31)
+                    'j/n/Y',  // Format sans zéros (1/1/2023)
+                    'j-n-Y',  // Format sans zéros avec tirets (1-1-2023)
+                ];
+
+                $dateConverted = false;
+
+                // Essayer chaque format jusqu'à ce qu'un fonctionne
+                foreach ($dateFormats as $format) {
+                    $dateObj = \DateTime::createFromFormat($format, $dateString);
+                    if ($dateObj !== false && !array_sum($dateObj->getLastErrors())) {
+                        $date = $dateObj;
+                        $dateConverted = true;
+                        break;
+                    }
+                }
+
+                // Si aucun format n'a fonctionné, essayer la méthode standard
+                if (!$dateConverted) {
+                    try {
+                        $date = new \DateTime($dateString);
+                        $dateConverted = true;
+                    } catch (\Exception $e) {
+                        // Enregistrer l'erreur pour le débogage
+                        $dateError = true;
+                        error_log("Impossible de convertir la date: {$dateString} - Erreur: " . $e->getMessage());
+                    }
+                }
+
+                // Si la date n'a pas pu être convertie, on peut la logger pour analyse
+                if (!$dateConverted) {
+                    $dateError = true;
+                    error_log("Format de date non reconnu: {$dateString} pour le radiogramme {$record['tranche']}");
+                }
+            }
+        }
+
+        // Si la date est invalide, ajouter à la table des erreurs au lieu d'importer
+        if ($dateError) {
+            throw new \Exception("Format de date invalide: {$dateString}");
+        }
+
         // Définir les propriétés du radiogramme
-        $radiogramme->setTranche($record['tranche']);
+        // Convertir explicitement tranche en entier
+        $radiogramme->setTranche((int) $record['tranche']);
         $radiogramme->setSysteme($record['systeme']);
         $radiogramme->setLigne($record['ligne'] ?? null);
         $radiogramme->setBigramme($record['bigramme'] ?? null);
@@ -402,19 +494,7 @@ class ImportDataService
         $radiogramme->setEtagere($record['etagere'] ?? null);
         $radiogramme->setBoite($record['boite'] ?? null);
         $radiogramme->setOi($record['oi'] ?? null);
-
-        // Convertir la date string en objet DateTime
-        $dateString = $record['date'] ?? null;
-        $date = null;
-        if (!empty($dateString)) {
-            try {
-                $date = new \DateTime($dateString);
-            } catch (\Exception $e) {
-                // Si la conversion échoue, on laisse la date à null
-            }
-        }
         $radiogramme->setDate($date);
-
         $radiogramme->setRf($record['rf'] ?? null);
         $radiogramme->setIsIps(filter_var($record['isIps'] ?? false, FILTER_VALIDATE_BOOLEAN));
         $radiogramme->setIsQs(filter_var($record['isQs'] ?? false, FILTER_VALIDATE_BOOLEAN));
@@ -478,6 +558,10 @@ class ImportDataService
         // Tableau pour suivre les valeurs uniques déjà traitées
         $processedUniqueValues = [];
         $processedCount = 0;
+        $batchSize = 5; // Taille de lot encore plus petite pour les erreurs
+
+        // Tableau pour collecter les erreurs à insérer par lots
+        $errorsToInsert = [];
 
         foreach ($this->errorRecords as $index => $errorData) {
             $record = $errorData['record'];
@@ -494,133 +578,220 @@ class ImportDataService
             }
             $processedUniqueValues[$uniqueValue] = true;
 
-            $existingError = $this->radiogrammeErrorRepository->findOneBy(['uniqueValue' => $uniqueValue]);
-
-            if (!$existingError) {
-                // Créer une nouvelle entité RadiogrammeError
-                $radiogrammeError = new RadiogrammeError();
-
-                // Gérer correctement le champ tranche qui doit être un int non-null
-                if (isset($record['tranche']) && $record['tranche'] !== null && $record['tranche'] !== '') {
-                    $radiogrammeError->setTranche((int) $record['tranche']);
-                } else {
-                    // Utiliser une valeur par défaut pour tranche si elle est null
-                    $radiogrammeError->setTranche(0);
+            try {
+                // Vérifier que l'EntityManager est ouvert
+                if (!$this->isEntityManagerOpen($errorEntityManager)) {
+                    $this->doctrine->resetManager('default');
+                    $errorEntityManager = $this->doctrine->getManager('default');
                 }
 
-                // Gérer correctement le champ systeme qui doit être une string non-null
-                // La longueur maximale est de 3 caractères
-                if (isset($record['systeme']) && $record['systeme'] !== null && $record['systeme'] !== '') {
-                    // Tronquer si nécessaire pour respecter la contrainte de longueur
-                    $radiogrammeError->setSysteme(substr($record['systeme'], 0, 3));
-                } else {
-                    // Utiliser une valeur par défaut courte
-                    $radiogrammeError->setSysteme('???');
-                }
+                $existingError = $this->radiogrammeErrorRepository->findOneBy(['uniqueValue' => $uniqueValue]);
 
-                $radiogrammeError->setLigne($record['ligne'] ?? null);
-                $radiogrammeError->setBigramme($record['bigramme'] ?? null);
-                $radiogrammeError->setIso($record['iso'] ?? null);
+                if (!$existingError) {
+                    // Créer une nouvelle entité RadiogrammeError
+                    $radiogrammeError = new RadiogrammeError();
 
-                // Gérer le champ repere qui ne peut pas être null
-                if (isset($record['repere']) && $record['repere'] !== null && $record['repere'] !== '') {
-                    $radiogrammeError->setRepere($record['repere']);
-                } else {
-                    // Utiliser une valeur par défaut
-                    $radiogrammeError->setRepere('Non spécifié');
-                }
-
-                $radiogrammeError->setVisite($record['visite'] ?? null);
-
-                // Gérer le champ traversee qui pourrait être non nullable
-                if (isset($record['traversee']) && $record['traversee'] !== null && $record['traversee'] !== '') {
-                    $radiogrammeError->setTraversee($record['traversee']);
-                } else {
-                    // Utiliser une valeur par défaut si nécessaire
-                    $radiogrammeError->setTraversee('N/A');
-                }
-
-                $radiogrammeError->setArmoire($record['armoire'] ?? null);
-                $radiogrammeError->setEtagere($record['etagere'] ?? null);
-                $radiogrammeError->setBoite($record['boite'] ?? null);
-                $radiogrammeError->setOi($record['oi'] ?? null);
-
-                // Convertir la date string en objet DateTime
-                $dateString = $record['date'] ?? null;
-                $date = null;
-                if (!empty($dateString)) {
-                    try {
-                        $date = new \DateTime($dateString);
-                    } catch (\Exception $e) {
-                        // Si la conversion échoue, on laisse la date à null
+                    // Gérer correctement le champ tranche qui doit être un int non-null
+                    if (isset($record['tranche']) && $record['tranche'] !== null && $record['tranche'] !== '') {
+                        $radiogrammeError->setTranche((int) $record['tranche']);
+                    } else {
+                        // Utiliser une valeur par défaut pour tranche si elle est null
+                        $radiogrammeError->setTranche(0);
                     }
-                }
-                $radiogrammeError->setDate($date);
 
-                $radiogrammeError->setRf($record['rf'] ?? null);
-                $radiogrammeError->setIsIps(filter_var($record['isIps'] ?? false, FILTER_VALIDATE_BOOLEAN));
-                $radiogrammeError->setIsQs(filter_var($record['isQs'] ?? false, FILTER_VALIDATE_BOOLEAN));
-                $radiogrammeError->setCpp($record['cpp'] ?? null);
-                $radiogrammeError->setCsp($record['csp'] ?? null);
-                $radiogrammeError->setCommande($record['commande'] ?? null);
+                    // Gérer correctement le champ systeme qui doit être une string non-null
+                    // La longueur maximale est de 3 caractères
+                    if (isset($record['systeme']) && $record['systeme'] !== null && $record['systeme'] !== '') {
+                        // Tronquer si nécessaire pour respecter la contrainte de longueur
+                        $radiogrammeError->setSysteme(substr($record['systeme'], 0, 3));
+                    } else {
+                        // Utiliser une valeur par défaut courte
+                        $radiogrammeError->setSysteme('???');
+                    }
 
-                // Gérer le champ titulaire qui ne peut pas être null
-                if (isset($record['titulaire']) && $record['titulaire'] !== null && $record['titulaire'] !== '') {
-                    $radiogrammeError->setTitulaire($record['titulaire']);
+                    $radiogrammeError->setLigne($record['ligne'] ?? null);
+                    $radiogrammeError->setBigramme($record['bigramme'] ?? null);
+                    $radiogrammeError->setIso($record['iso'] ?? null);
+
+                    // Gérer le champ repere qui ne peut pas être null
+                    if (isset($record['repere']) && $record['repere'] !== null && $record['repere'] !== '') {
+                        $radiogrammeError->setRepere($record['repere']);
+                    } else {
+                        // Utiliser une valeur par défaut
+                        $radiogrammeError->setRepere('Non spécifié');
+                    }
+
+                    $radiogrammeError->setVisite($record['visite'] ?? null);
+
+                    // Gérer le champ traversee qui pourrait être non nullable
+                    if (isset($record['traversee']) && $record['traversee'] !== null && $record['traversee'] !== '') {
+                        $radiogrammeError->setTraversee($record['traversee']);
+                    } else {
+                        // Utiliser une valeur par défaut si nécessaire
+                        $radiogrammeError->setTraversee('N/A');
+                    }
+
+                    $radiogrammeError->setArmoire($record['armoire'] ?? null);
+                    $radiogrammeError->setEtagere($record['etagere'] ?? null);
+                    $radiogrammeError->setBoite($record['boite'] ?? null);
+                    $radiogrammeError->setOi($record['oi'] ?? null);
+
+                    // Convertir la date string en objet DateTime
+                    $dateString = $record['date'] ?? null;
+                    $date = null;
+                    if (!empty($dateString)) {
+                        try {
+                            $date = new \DateTime($dateString);
+                        } catch (\Exception $e) {
+                            // Si la conversion échoue, on laisse la date à null
+                        }
+                    }
+                    $radiogrammeError->setDate($date);
+
+                    $radiogrammeError->setRf($record['rf'] ?? null);
+                    $radiogrammeError->setIsIps(filter_var($record['isIps'] ?? false, FILTER_VALIDATE_BOOLEAN));
+                    $radiogrammeError->setIsQs(filter_var($record['isQs'] ?? false, FILTER_VALIDATE_BOOLEAN));
+                    $radiogrammeError->setCpp($record['cpp'] ?? null);
+                    $radiogrammeError->setCsp($record['csp'] ?? null);
+                    $radiogrammeError->setCommande($record['commande'] ?? null);
+
+                    // Gérer le champ titulaire qui ne peut pas être null
+                    if (isset($record['titulaire']) && $record['titulaire'] !== null && $record['titulaire'] !== '') {
+                        $radiogrammeError->setTitulaire($record['titulaire']);
+                    } else {
+                        // Utiliser une valeur par défaut
+                        $radiogrammeError->setTitulaire('Non spécifié');
+                    }
+
+                    $radiogrammeError->setObservation($record['observation'] ?? null);
+
+                    // Définir les informations d'erreur
+                    $radiogrammeError->setErrorType($errorType);
+                    $radiogrammeError->setErrorMessage($errorMessage);
+                    $radiogrammeError->setUniqueValue($uniqueValue);
+
+                    // Ajouter à la liste des erreurs à insérer par lots
+                    $errorsToInsert[] = $radiogrammeError;
+                    $processedCount++;
+
+                    // Traiter par lots pour économiser la mémoire
+                    if (count($errorsToInsert) >= $batchSize) {
+                        $this->bulkInsertErrors($errorsToInsert, $errorEntityManager, $style, $progressBar);
+                        $errorsToInsert = [];
+                    }
+
+                    $progressBar->setMessage(sprintf('Enregistrement de l\'erreur %d/%d', $processedCount, count($this->errorRecords)));
                 } else {
-                    // Utiliser une valeur par défaut
-                    $radiogrammeError->setTitulaire('Non spécifié');
+                    $progressBar->setMessage(sprintf('Erreur déjà enregistrée pour %s', $uniqueValue));
                 }
+            } catch (\Exception $e) {
+                $progressBar->setMessage(sprintf('Erreur lors de l\'enregistrement: %s', $e->getMessage()));
 
-                $radiogrammeError->setObservation($record['observation'] ?? null);
-
-                // Définir les informations d'erreur
-                $radiogrammeError->setErrorType($errorType);
-                $radiogrammeError->setErrorMessage($errorMessage);
-
-                // Ne pas définir directement uniqueValue, laisser la méthode generateUniqueValue() de l'entité le faire
-                // $radiogrammeError->setUniqueValue($uniqueValue);
-
-                // Persister l'entité
-                $errorEntityManager->persist($radiogrammeError);
-                $processedCount++;
-
-                // Flush toutes les 50 entités
-                if (($processedCount) % 50 === 0) {
-                    $errorEntityManager->flush();
-                    $errorEntityManager->clear();
-                }
-
-                $progressBar->setMessage(sprintf('Enregistrement de l\'erreur %d/%d', $processedCount, count($this->errorRecords)));
-            } else {
-                $progressBar->setMessage(sprintf('Erreur déjà enregistrée pour %s', $uniqueValue));
+                // Réinitialiser l'EntityManager en cas d'erreur
+                $this->doctrine->resetManager('default');
+                $errorEntityManager = $this->doctrine->getManager('default');
             }
 
             $progressBar->advance();
         }
 
-        // Flush les entités restantes
-        $errorEntityManager->flush();
+        // Traiter les erreurs restantes
+        if (!empty($errorsToInsert)) {
+            $this->bulkInsertErrors($errorsToInsert, $errorEntityManager, $style, $progressBar);
+        }
 
         $progressBar->finish();
-        $style->newLine(2);
-        $style->success(sprintf('%d erreurs enregistrées pour analyse ultérieure', $processedCount));
+        $style->newLine();
+
+        if ($processedCount > 0) {
+            $style->success(sprintf('%d erreurs enregistrées pour analyse ultérieure', $processedCount));
+        } else {
+            $style->info('Aucune nouvelle erreur à enregistrer');
+        }
+
+        // Afficher un résumé des types d'erreurs
+        if (!empty($this->errorTypes)) {
+            $style->section('Résumé des erreurs');
+            foreach ($this->errorTypes as $type => $count) {
+                $style->text(sprintf('- %s: %d', $type, $count));
+            }
+            $style->note('Les erreurs ont été enregistrées dans la table radiogrammes_errors pour analyse ultérieure.');
+        }
     }
 
     /**
-     * Formate un enregistrement pour l'affichage dans un message d'erreur
+     * Insère les erreurs par lots pour optimiser la mémoire
+     *
+     * @param array<RadiogrammeError> $errors Liste des erreurs à insérer
+     * @param EntityManagerInterface $entityManager EntityManager à utiliser
+     * @param SymfonyStyle $style Interface pour afficher la progression
+     * @param ProgressBar|null $progressBar Barre de progression (optionnelle)
      */
-    private function formatRecordForErrorMessage(array $record): string
+    private function bulkInsertErrors(array $errors, EntityManagerInterface $entityManager, SymfonyStyle $style, ?ProgressBar $progressBar = null): void
     {
-        $keyFields = ['tranche', 'systeme', 'ligne', 'bigramme', 'iso', 'repere', 'visite', 'traversee'];
-        $formattedRecord = [];
-
-        foreach ($keyFields as $field) {
-            if (isset($record[$field])) {
-                $formattedRecord[] = "$field: " . $record[$field];
-            }
+        if (empty($errors)) {
+            return;
         }
 
-        return implode(', ', $formattedRecord);
+        try {
+            foreach ($errors as $error) {
+                $entityManager->persist($error);
+            }
+
+            $entityManager->flush();
+            $entityManager->clear(); // Libérer la mémoire
+
+            // Libérer la mémoire explicitement
+            gc_collect_cycles();
+        } catch (\Exception $e) {
+            if ($progressBar) {
+                $progressBar->setMessage('Erreur lors de l\'insertion: ' . $e->getMessage());
+            } else {
+                $style->warning('Erreur lors de l\'insertion: ' . $e->getMessage());
+            }
+
+            // Réinitialiser l'EntityManager en cas d'erreur
+            $this->doctrine->resetManager('default');
+        }
+    }
+
+    /**
+     * Insère les radiogrammes par lots pour optimiser la mémoire
+     *
+     * @param array<Radiogramme> $radiogrammes Liste des radiogrammes à insérer
+     * @param SymfonyStyle $style Interface pour afficher la progression
+     * @param ProgressBar|null $progressBar Barre de progression (optionnelle)
+     */
+    private function bulkInsertRadiogrammes(array $radiogrammes, SymfonyStyle $style, ?ProgressBar $progressBar = null): void
+    {
+        if (empty($radiogrammes)) {
+            return;
+        }
+
+        try {
+            // Vérifier que l'EntityManager est ouvert
+            if (!$this->isEntityManagerOpen()) {
+                $this->resetEntityManager();
+            }
+
+            foreach ($radiogrammes as $radiogramme) {
+                $this->entityManager->persist($radiogramme);
+            }
+
+            $this->entityManager->flush();
+            $this->entityManager->clear(); // Libérer la mémoire
+
+            // Libérer la mémoire explicitement
+            gc_collect_cycles();
+        } catch (\Exception $e) {
+            if ($progressBar) {
+                $progressBar->setMessage('Erreur lors de l\'insertion: ' . $e->getMessage());
+            } else {
+                $style->warning('Erreur lors de l\'insertion: ' . $e->getMessage());
+            }
+
+            // Réinitialiser l'EntityManager en cas d'erreur
+            $this->resetEntityManager();
+        }
     }
 }

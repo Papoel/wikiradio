@@ -22,7 +22,11 @@ class ImportRadiogrammesCommand extends Command
     {
         $style = new SymfonyStyle($input, $output);
 
-        $this->importDataService->importData('datas', $style);
+        $this->importDataService->importData(
+            folder: 'datas',
+            filenames: ['radiogrammes-1.csv'],
+            style: $style
+        );
 
         return Command::SUCCESS;
     }

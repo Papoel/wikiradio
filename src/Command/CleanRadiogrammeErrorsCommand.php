@@ -78,27 +78,27 @@ class CleanRadiogrammeErrorsCommand extends Command
         $errorsQb = $this->entityManager->createQueryBuilder();
         $errorsQb->select('e')
             ->from('App\Entity\RadiogrammeError', 'e');
-        
+
         if ($isResolved !== null) {
             $errorsQb->where('e.isResolved = :resolved')
                 ->setParameter('resolved', $isResolved);
         }
-        
+
         $errorsQb->orderBy('e.createdAt', 'DESC')
                 ->setMaxResults($limit);
-        
+
         $errors = $errorsQb->getQuery()->getResult();
 
         // Construire la requête pour compter le nombre total d'erreurs
         $countQb = $this->entityManager->createQueryBuilder();
         $countQb->select('COUNT(e.id)')
             ->from('App\Entity\RadiogrammeError', 'e');
-        
+
         if ($isResolved !== null) {
             $countQb->where('e.isResolved = :resolved')
                 ->setParameter('resolved', $isResolved);
         }
-        
+
         $count = (int) $countQb->getQuery()->getSingleScalarResult();
 
         if ($count === 0) {
@@ -121,7 +121,7 @@ class CleanRadiogrammeErrorsCommand extends Command
             $all ? 'toutes les' : 'ces',
             $count
         );
-        
+
         if (!$style->confirm($confirmMessage, false)) {
             $style->warning('Opération annulée.');
             return Command::SUCCESS;
@@ -130,7 +130,7 @@ class CleanRadiogrammeErrorsCommand extends Command
         // Construire la requête de suppression
         $deleteQb = $this->entityManager->createQueryBuilder();
         $deleteQb->delete('App\Entity\RadiogrammeError', 'e');
-        
+
         if ($isResolved !== null) {
             $deleteQb->where('e.isResolved = :resolved')
                 ->setParameter('resolved', $isResolved);

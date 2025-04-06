@@ -372,7 +372,12 @@ class Radiogramme
      */
     public function calculateUniqueValue(): string
     {
-        return $this->tranche . '-' . $this->systeme . '-' . $this->ligne . '-' . $this->bigramme . '-' . $this->iso . '-' . $this->repere . '-' . $this->visite . '-' . $this->date->format('Y');
+        $year = '';
+        if ($this->date !== null) {
+            $year = $this->date->format('Y');
+        }
+
+        return $this->tranche . '-' . $this->systeme . '-' . $this->ligne . '-' . $this->bigramme . '-' . $this->iso . '-' . $this->repere . '-' . $this->visite . '-' . $year;
     }
 
     /**
