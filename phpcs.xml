@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<ruleset name="WikiRadio Coding Standard">
+    <description>WikiRadio Coding Standard basé sur PSR-12 avec quelques ajustements</description>
+
+    <!-- Inclure tous les fichiers dans src/ -->
+    <file>src/</file>
+
+    <!-- Utiliser PSR-12 comme base -->
+    <rule ref="PSR12"/>
+
+    <!-- Augmenter la limite de caractères par ligne à 200 -->
+    <rule ref="Generic.Files.LineLength">
+        <properties>
+            <property name="lineLimit" value="200"/>
+            <property name="absoluteLineLimit" value="0"/>
+        </properties>
+    </rule>
+</ruleset>

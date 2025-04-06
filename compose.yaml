@@ -1,7 +1,9 @@
 services:
   # FrankenPHP - Serveur web moderne pour PHP
   frankenphp:
-    image: dunglas/frankenphp:latest
+    build:
+      context: .
+      dockerfile: docker/frankenphp/Dockerfile
     container_name: wikiradio_frankenphp
     ports:
       - "8080:80" # HTTP
